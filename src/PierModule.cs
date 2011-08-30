@@ -1,10 +1,9 @@
 ﻿using System;
-using System.Configuration;
 using System.Data.Entity;
 using System.IO;
 using System.Linq;
+using System.Net.Mime;
 using System.Transactions;
-using System.Xml.Linq;
 using Devtalk.EF.CodeFirst;
 using Nancy;
 
@@ -16,24 +15,30 @@ namespace Pier
 
         public PierModule()
         {
-
             Database.SetInitializer(new DontDropDbJustCreateTablesIfModelChanged<PierContext>());
-            
+
             Db = new PierContext();
 
             Get["/yourls-api.php"] = x =>
                                          {
-                                             try
+                                             var action = string.Empty;
+                                             if (Request.Query.Action != null)
+                                                 action = Request.Query.Action;
+                                             else if (Request.Query.action != null)
+                                                 action = Request.Query.action;
+
+                                             if (!string.IsNullOrEmpty(action) && action.ToLower() == "shorturl")
                                              {
-                                                 return Shorten(x);
+                                                 var shortend = Shorten(Uri.UnescapeDataString(Request.Query.url));
+                                                 return shortend.ToXml();
                                              }
-                                             catch (Exception ex)
-                                             {
-                                                 return ex.Message;
-                                             }
+
+                                             return View["index"];
                                          };
 
-            Get["/*"] = x => "<img src=\"pier.png\" /><br />Welcome to Pier";
+            Post["/*"] = x => View["Shortened",Shorten(Request.Form.longurl)];
+
+            Get["/*"] = x => View["index"];
 
             Get["/{shortUrl}"] = x =>
                                      {
@@ -55,125 +60,30 @@ namespace Pier
 
         }
 
-        private string _shortUrlCharacterSet;
-        public string ShortUrlCharacterSet
+        public Shortened Shorten(string longurl)
         {
-            get
+            var existing = Db.ShortUrls.Where(u => u.LongUrl == longurl).FirstOrDefault();
+            if (existing != null)
             {
-                if (_shortUrlCharacterSet == null)
-                {
-                    switch (ConfigurationManager.AppSettings["baseHash"])
-                    {
-                        case "36":
-                            _shortUrlCharacterSet = "0123456789abcdefghijklmnopqrstuvwxyz";
-                            break;
-                        case "62":
-                        case "64":
-                            _shortUrlCharacterSet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-                            break;
-
-                    }
-                }
-
-                return _shortUrlCharacterSet;
+                return existing;
             }
-        }
-
-        public string Encode(int id)
-        {
-            string result = string.Empty;
-            var length = ShortUrlCharacterSet.Length;
-
-            while (id >= length)
+            var newShort = new Shortened()
             {
-                var mod = id % length;
-                id = id / length;
-                result = ShortUrlCharacterSet[mod] + result;
-            }
+                Hits = 0,
+                LongUrl = longurl,
+                Date = DateTime.Now
+            };
 
-            result = ShortUrlCharacterSet[id] + result;
-            return result;
-        }
-
-        public Response Shorten(dynamic req)
-        {
-            var action = string.Empty;
-            if (Request.Query.Action != null)
-                action = Request.Query.Action;
-            else if (Request.Query.action != null)
-                action = Request.Query.action;
-
-            if (!string.IsNullOrEmpty(action))
+            using (var scope = new TransactionScope(TransactionScopeOption.RequiresNew, new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted, Timeout = TransactionManager.DefaultTimeout }))
             {
-                switch (action.ToLower())
-                {
-                    case "shorturl":
+                Db.ShortUrls.Add(newShort);
+                Db.SaveChanges();
 
-                        //Expressions may not contain dynamics
-                        var url = string.Empty;
-                        url = Uri.UnescapeDataString(Request.Query.url);
-
-                        var existing = Db.ShortUrls.Where(u => u.LongUrl == url).FirstOrDefault();
-                        if (existing != null)
-                        {
-                            return new Response
-                                    {
-
-                                        ContentType = "application/xml",
-                                        Contents = Result(url, existing.ShortUrl, existing.Id, existing.Date)
-                                    };
-                        }
-                        var newShort = new Shortened()
-                                               {
-                                                   Hits = 0,
-                                                   LongUrl = url,
-                                                   Date = DateTime.Now
-                                               };
-
-                        using (var scope = new TransactionScope(TransactionScopeOption.RequiresNew, new TransactionOptions { IsolationLevel = IsolationLevel.ReadCommitted, Timeout = TransactionManager.DefaultTimeout }))
-                        {
-                            Db.ShortUrls.Add(newShort);
-                            Db.SaveChanges();
-
-                            newShort.ShortUrl = Encode(newShort.Id);
-                            Db.SaveChanges();
-                            scope.Complete();
-                        }
-                        var r = new Response
-                                    {
-                                        ContentType = "application/xml",
-                                        Contents = Result(url, newShort.ShortUrl, newShort.Id, newShort.Date, Request.UserHostAddress)
-                                    };
-                        return r;
-                        break;
-
-                    case "expand":
-                        break;
-                }
+                newShort.ShortUrl = PierHelpers.Encode(newShort.Id);
+                Db.SaveChanges();
+                scope.Complete();
             }
-
-            return "";
-        }
-
-        public Action<Stream> Result(string url, string shorturl, int id, DateTime time, string ip = null)
-        {
-            return stream =>
-                       {
-                           var x = new XElement("result",
-                                                new XElement("url",
-                                                             new XElement("id", id),
-                                                             new XElement("keyword", shorturl),
-                                                             new XElement("url", url),
-                                                             new XElement("date", time),
-                                                             new XElement("ip", ip)
-                                                    ),
-                                                new XElement("status", "success"),
-                                                new XElement("message", string.Format("{0} added to database", url)),
-                                                new XElement("shorturl", /*should add in base url*/ shorturl)
-                               );
-                           x.Save(stream);
-                       };
+            return newShort;
         }
     }
-
 }
